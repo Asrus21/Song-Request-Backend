@@ -145,7 +145,7 @@ async function sendTwitchMessage(channel, message, accessToken) {
 // Iniciar login - redireciona para Twitch
 app.get('/api/auth/twitch', (req, res) => {
   const state = generateUUID();
-  const authUrl = `https://id.twitch.tv/oauth2/authorize?client_id=${TWITCH_CLIENT_ID}&redirect_uri=${encodeURIComponent(TWITCH_REDIRECT_URI)}&response_type=code&scope=chat:write+user:read:email&state=${state}`;
+  const authUrl = `https://id.twitch.tv/oauth2/authorize?client_id=${TWITCH_CLIENT_ID}&redirect_uri=${encodeURIComponent(TWITCH_REDIRECT_URI)}&response_type=code&scope=chat:edit+user:read:email&state=${state}`;
   res.json({ url: authUrl, state });
 });
 
