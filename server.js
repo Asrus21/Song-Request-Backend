@@ -9,60 +9,17 @@ app.use(cors());
 app.use(express.json());
 
 // ==================== CONFIGURAÇÕES ====================
-// Variáveis de ambiente (configure no Railway)
 const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID;
 const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET;
-const TWITCH_REDIRECT_URI = process.env.TWITCH_REDIRECT_URI || 'https://seu-backend.railway.app/api/auth/twitch/callback';
+const TWITCH_REDIRECT_URI = process.env.TWITCH_REDIRECT_URI || 'https://song-request-backend-production.up.railway.app/api/auth/twitch/callback';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://asrus21.github.io/Song-Request-Queue';
 
 // Configuração do PostgreSQL
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
-
-// ==================== BANCO DE DADOS ====================
-async function initDatabase() {
-  try {
-    await pool.query(`
-      -- Tabela de usuários Twitch
-      CREATE TABLE IF NOT EXISTS twitch_users (
-        id SERIAL PRIMARY KEY,
-        twitch_user_id VARCHAR(30) UNIQUE NOT NULL,
-        twitch_login VARCHAR(50) NOT NULL,
-        twitch_display_name VARCHAR(100) NOT NULL,
-        access_token TEXT NOT NULL,
-        refresh_token TEXT NOT NULL,
-        token_expires_at TIMESTAMP NOT NULL,
-        channel_name VARCHAR(50),
-        created_at TIMESTAMP DEFAULT NOW(),
-        updated_at TIMESTAMP DEFAULT NOW()
-      );
-      
-      -- Tabela de favoritos
-      CREATE TABLE IF NOT EXISTS favorites (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES twitch_users(id) ON DELETE CASCADE,
-        video_id VARCHAR(50) NOT NULL,
-        title TEXT NOT NULL,
-        channel VARCHAR(255) NOT NULL,
-        thumbnail TEXT,
-        service VARCHAR(20) DEFAULT 'youtube',
-        added_at TIMESTAMP DEFAULT NOW(),
-        UNIQUE(user_id, video_id, service)
-      );
-      
-      -- Índices
-      CREATE INDEX IF NOT EXISTS idx_twitch_users_twitch_user_id ON twitch_users(twitch_user_id);
-      CREATE INDEX IF NOT EXISTS idx_favorites_user_id ON favorites(user_id);
-    `);
-    console.log('✅ Banco de dados inicializado com sucesso!');
-  } catch (error) {
-    console.error('Erro ao inicializar banco:', error);
-  }
-}
-
-initDatabase();
 
 // ==================== FUNÇÕES AUXILIARES ====================
 function generateUUID() {
@@ -114,42 +71,98 @@ async function getValidAccessToken(userId, refreshToken) {
   return await refreshTwitchToken(userId, refreshToken);
 }
 
-// ==================== ENVIAR MENSAGEM VIA IRC ====================
-async function sendTwitchMessage(channel, message, accessToken) {
-  // Usar a API Helix do Twitch para enviar mensagem (mais moderna que IRC)
+// ==================== BANCO DE DADOS ====================
+async function initDatabase() {
   try {
-    const response = await axios.post(
-      'https://api.twitch.tv/helix/chat/messages',
-      {
-        broadcaster_id: channel,
-        moderator_id: channel,
-        message: message
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Client-Id': TWITCH_CLIENT_ID,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    return { success: true, data: response.data };
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS twitch_users (
+        id SERIAL PRIMARY KEY,
+        twitch_user_id VARCHAR(30) UNIQUE NOT NULL,
+        twitch_login VARCHAR(50) NOT NULL,
+        twitch_display_name VARCHAR(100) NOT NULL,
+        access_token TEXT NOT NULL,
+        refresh_token TEXT NOT NULL,
+        token_expires_at TIMESTAMP NOT NULL,
+        channel_name VARCHAR(50),
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+      
+      CREATE TABLE IF NOT EXISTS favorites (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES twitch_users(id) ON DELETE CASCADE,
+        video_id VARCHAR(50) NOT NULL,
+        title TEXT NOT NULL,
+        channel VARCHAR(255) NOT NULL,
+        thumbnail TEXT,
+        service VARCHAR(20) DEFAULT 'youtube',
+        added_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(user_id, video_id, service)
+      );
+      
+      CREATE TABLE IF NOT EXISTS user_sessions (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES twitch_users(id) ON DELETE CASCADE,
+        session_uuid VARCHAR(32) UNIQUE NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(user_id)
+      );
+      
+      CREATE INDEX IF NOT EXISTS idx_twitch_users_twitch_user_id ON twitch_users(twitch_user_id);
+      CREATE INDEX IF NOT EXISTS idx_favorites_user_id ON favorites(user_id);
+      CREATE INDEX IF NOT EXISTS idx_user_sessions_uuid ON user_sessions(session_uuid);
+    `);
+    console.log('✅ Banco de dados inicializado com sucesso!');
   } catch (error) {
-    // Fallback para IRC WebSocket se a Helix falhar
-    console.error('Erro ao enviar via Helix:', error.response?.data || error.message);
-    return { success: false, error: error.response?.data || error.message };
+    console.error('Erro ao inicializar banco:', error);
   }
 }
 
+initDatabase();
+
+// ==================== SPOTIFY PROXY ====================
+let spotifyAccessToken = null;
+let spotifyTokenExpiry = null;
+
+async function getSpotifyAccessToken() {
+  if (spotifyAccessToken && spotifyTokenExpiry && Date.now() < spotifyTokenExpiry) {
+    return spotifyAccessToken;
+  }
+  
+  const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
+  const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
+  
+  if (!SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET) {
+    throw new Error('Spotify credentials not configured');
+  }
+  
+  const response = await axios.post('https://accounts.spotify.com/api/token', 
+    'grant_type=client_credentials',
+    {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': 'Basic ' + Buffer.from(SPOTIFY_CLIENT_ID + ':' + SPOTIFY_CLIENT_SECRET).toString('base64')
+      }
+    }
+  );
+  
+  spotifyAccessToken = response.data.access_token;
+  spotifyTokenExpiry = Date.now() + (response.data.expires_in * 1000);
+  return spotifyAccessToken;
+}
+
+// ==================== HEALTH CHECK ====================
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'online', timestamp: new Date() });
+});
+
 // ==================== TWITCH OAUTH ====================
-// Iniciar login - redireciona para Twitch
 app.get('/api/auth/twitch', (req, res) => {
   const state = generateUUID();
   const authUrl = `https://id.twitch.tv/oauth2/authorize?client_id=${TWITCH_CLIENT_ID}&redirect_uri=${encodeURIComponent(TWITCH_REDIRECT_URI)}&response_type=code&scope=chat:edit+user:read:email&state=${state}`;
   res.json({ url: authUrl, state });
 });
 
-// Callback após autorização
 app.get('/api/auth/twitch/callback', async (req, res) => {
   const { code, state } = req.query;
   
@@ -158,7 +171,6 @@ app.get('/api/auth/twitch/callback', async (req, res) => {
   }
   
   try {
-    // Trocar código por token
     const tokenResponse = await axios.post('https://id.twitch.tv/oauth2/token', null, {
       params: {
         client_id: TWITCH_CLIENT_ID,
@@ -172,7 +184,6 @@ app.get('/api/auth/twitch/callback', async (req, res) => {
     const { access_token, refresh_token, expires_in } = tokenResponse.data;
     const expiresAt = new Date(Date.now() + expires_in * 1000);
     
-    // Obter dados do usuário
     const userResponse = await axios.get('https://api.twitch.tv/helix/users', {
       headers: {
         'Authorization': `Bearer ${access_token}`,
@@ -185,7 +196,6 @@ app.get('/api/auth/twitch/callback', async (req, res) => {
     const twitchLogin = twitchUser.login;
     const twitchDisplayName = twitchUser.display_name;
     
-    // Verificar se usuário já existe
     const existingUser = await pool.query(
       'SELECT id FROM twitch_users WHERE twitch_user_id = $1',
       [twitchUserId]
@@ -210,10 +220,8 @@ app.get('/api/auth/twitch/callback', async (req, res) => {
       userId = insertResult.rows[0].id;
     }
     
-    // Gerar UUID para o frontend (identificador de sessão)
     const sessionUUID = generateUUID();
     
-    // Salvar UUID temporário (pode ser armazenado em uma tabela de sessões)
     await pool.query(
       `INSERT INTO user_sessions (user_id, session_uuid, created_at)
        VALUES ($1, $2, NOW())
@@ -221,17 +229,16 @@ app.get('/api/auth/twitch/callback', async (req, res) => {
       [userId, sessionUUID]
     );
     
-    // Redirecionar para o frontend com o UUID
-    const frontendUrl = process.env.FRONTEND_URL || 'https://asrus21.github.io/Song-Request-Queue';
-    res.redirect(`${frontendUrl}?login=success&uuid=${sessionUUID}`);
+    // Redirecionar para o frontend com os parâmetros
+    res.redirect(`${FRONTEND_URL}?login=success&uuid=${sessionUUID}`);
     
   } catch (error) {
     console.error('Erro no callback:', error.response?.data || error.message);
-    res.status(500).send('Erro ao autenticar com Twitch');
+    res.redirect(`${FRONTEND_URL}?login=error`);
   }
 });
 
-// Verificar sessão do usuário (frontend chama com UUID)
+// ==================== VERIFICAR SESSÃO ====================
 app.post('/api/auth/verify', async (req, res) => {
   const { uuid } = req.body;
   
@@ -256,7 +263,6 @@ app.post('/api/auth/verify', async (req, res) => {
     const user = result.rows[0];
     const isTokenValid = new Date() < user.token_expires_at;
     
-    // Buscar favoritos
     const favoritesResult = await pool.query(
       `SELECT video_id, title, channel, thumbnail, service, added_at
        FROM favorites 
@@ -283,7 +289,7 @@ app.post('/api/auth/verify', async (req, res) => {
   }
 });
 
-// Salvar canal configurado pelo usuário
+// ==================== SALVAR CANAL ====================
 app.post('/api/user/channel', async (req, res) => {
   const { uuid, channelName } = req.body;
   
@@ -317,7 +323,6 @@ app.post('/api/user/channel', async (req, res) => {
 });
 
 // ==================== FAVORITOS ====================
-// Salvar todos favoritos
 app.post('/api/favorites', async (req, res) => {
   const { uuid, favorites } = req.body;
   
@@ -353,7 +358,6 @@ app.post('/api/favorites', async (req, res) => {
       }
       
       await client.query('COMMIT');
-      console.log(`💾 Favoritos salvos para usuário ${userId}: ${favorites.length} itens`);
       res.json({ success: true, count: favorites.length });
     } catch (error) {
       await client.query('ROLLBACK');
@@ -367,7 +371,6 @@ app.post('/api/favorites', async (req, res) => {
   }
 });
 
-// Adicionar um favorito
 app.post('/api/favorites/add', async (req, res) => {
   const { uuid, video } = req.body;
   
@@ -403,7 +406,6 @@ app.post('/api/favorites/add', async (req, res) => {
   }
 });
 
-// Remover um favorito
 app.delete('/api/favorites', async (req, res) => {
   const { uuid, videoId } = req.body;
   
@@ -436,7 +438,6 @@ app.delete('/api/favorites', async (req, res) => {
   }
 });
 
-// Limpar todos favoritos
 app.delete('/api/favorites/all', async (req, res) => {
   const { uuid } = req.body;
   
@@ -497,36 +498,6 @@ app.post('/api/youtube/search', async (req, res) => {
 });
 
 // ==================== SPOTIFY PROXY ====================
-let spotifyAccessToken = null;
-let spotifyTokenExpiry = null;
-
-async function getSpotifyAccessToken() {
-  if (spotifyAccessToken && spotifyTokenExpiry && Date.now() < spotifyTokenExpiry) {
-    return spotifyAccessToken;
-  }
-  
-  const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
-  const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
-  
-  if (!SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET) {
-    throw new Error('Spotify credentials not configured');
-  }
-  
-  const response = await axios.post('https://accounts.spotify.com/api/token', 
-    'grant_type=client_credentials',
-    {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Authorization': 'Basic ' + Buffer.from(SPOTIFY_CLIENT_ID + ':' + SPOTIFY_CLIENT_SECRET).toString('base64')
-      }
-    }
-  );
-  
-  spotifyAccessToken = response.data.access_token;
-  spotifyTokenExpiry = Date.now() + (response.data.expires_in * 1000);
-  return spotifyAccessToken;
-}
-
 app.post('/api/spotify/search', async (req, res) => {
   const { query } = req.body;
   
@@ -552,7 +523,7 @@ app.post('/api/spotify/search', async (req, res) => {
   }
 });
 
-// ==================== ENVIAR COMANDOS ====================
+// ==================== ENVIAR COMANDO ====================
 app.post('/api/send', async (req, res) => {
   const { uuid, videoId, title, service } = req.body;
   
@@ -585,15 +556,41 @@ app.post('/api/send', async (req, res) => {
       return res.status(401).json({ error: 'Token Twitch expirado. Faça login novamente.' });
     }
     
-    // Enviar mensagem
-    const message = `!sr ${videoId}`;
-    const result = await sendTwitchMessage(user.channel_name, message, accessToken);
-    
-    if (result.success) {
-      console.log(`✅ Comando enviado: ${message} para #${user.channel_name}`);
+    // Usar API Helix para enviar mensagem
+    try {
+      // Primeiro, obter o broadcaster_id
+      const userInfoResponse = await axios.get('https://api.twitch.tv/helix/users', {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Client-Id': TWITCH_CLIENT_ID
+        }
+      });
+      
+      const broadcasterId = userInfoResponse.data.data[0].id;
+      
+      // Enviar mensagem usando a API Helix
+      await axios.post(
+        'https://api.twitch.tv/helix/chat/messages',
+        {
+          broadcaster_id: broadcasterId,
+          moderator_id: broadcasterId,
+          message: `!sr ${videoId}`
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Client-Id': TWITCH_CLIENT_ID,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      console.log(`✅ Comando enviado: !sr ${videoId} para #${user.channel_name}`);
       res.json({ success: true });
-    } else {
-      res.status(500).json({ error: result.error || 'Falha ao enviar mensagem' });
+      
+    } catch (apiError) {
+      console.error('Erro ao enviar via Helix:', apiError.response?.data || apiError.message);
+      res.status(500).json({ error: 'Erro ao enviar mensagem no chat' });
     }
     
   } catch (error) {
@@ -602,46 +599,12 @@ app.post('/api/send', async (req, res) => {
   }
 });
 
-// ==================== HEALTH CHECK ====================
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'online', timestamp: new Date() });
-});
-
-// ==================== CRIAR TABELA DE SESSÕES ====================
-async function createSessionsTable() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS user_sessions (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES twitch_users(id) ON DELETE CASCADE,
-        session_uuid VARCHAR(32) UNIQUE NOT NULL,
-        created_at TIMESTAMP DEFAULT NOW(),
-        UNIQUE(user_id)
-      );
-    `);
-    console.log('✅ Tabela user_sessions criada/verificada');
-  } catch (error) {
-    console.error('Erro ao criar user_sessions:', error);
-  }
-}
-
-createSessionsTable();
-
 // ==================== INICIAR SERVIDOR ====================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
   console.log(`🔗 Health check: http://localhost:${PORT}/api/health`);
-  
-  if (TWITCH_CLIENT_ID && TWITCH_CLIENT_SECRET) {
-    console.log(`🎮 Twitch OAuth configurado!`);
-  } else {
-    console.log(`⚠️ Twitch OAuth NÃO configurado. Configure TWITCH_CLIENT_ID e TWITCH_CLIENT_SECRET.`);
-  }
-  
-  if (YOUTUBE_API_KEY) {
-    console.log(`▶️ YouTube API configurada!`);
-  } else {
-    console.log(`⚠️ YouTube API NÃO configurada. Configure YOUTUBE_API_KEY.`);
-  }
+  console.log(`🎮 Twitch OAuth configurado: ${!!TWITCH_CLIENT_ID}`);
+  console.log(`▶️ YouTube API configurada: ${!!YOUTUBE_API_KEY}`);
+  console.log(`🎵 Spotify configurado: ${!!process.env.SPOTIFY_CLIENT_ID}`);
 });
