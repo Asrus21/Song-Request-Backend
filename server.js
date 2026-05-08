@@ -112,6 +112,13 @@ async function initDatabase() {
       CREATE INDEX IF NOT EXISTS idx_favorites_user_id ON favorites(user_id);
       CREATE INDEX IF NOT EXISTS idx_user_sessions_uuid ON user_sessions(session_uuid);
     `);
+
+    // Migrations — adiciona colunas novas em tabelas já existentes
+await pool.query(`
+  ALTER TABLE favorites 
+  ADD COLUMN IF NOT EXISTS service VARCHAR(20) DEFAULT 'youtube'
+`);
+    
     console.log('✅ Banco de dados inicializado com sucesso!');
   } catch (error) {
     console.error('Erro ao inicializar banco:', error);
