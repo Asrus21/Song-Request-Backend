@@ -173,10 +173,14 @@ async function initDatabase() {
       END $$;
     `);
 
-    // 5. Amplia coluna service para não truncar valores longos
+    // 5. Amplia coluna service — força o tipo independente de constraints existentes
     await pool.query(`
-      ALTER TABLE favorites
-      ALTER COLUMN service TYPE VARCHAR(50)
+      DO $$
+      BEGIN
+        ALTER TABLE favorites ALTER COLUMN service TYPE VARCHAR(50);
+      EXCEPTION WHEN others THEN
+        NULL; -- ignora se já for maior ou outro erro menor
+      END $$;
     `);
 
     console.log('✅ Banco de dados inicializado com sucesso!');
@@ -405,6 +409,7 @@ app.post('/api/favorites/add', async (req, res) => {
     }
 
     const userId = userResult.rows[0].id;
+    const safeService = (video.service || 'youtube').substring(0, 50);
 
     await pool.query(
       `INSERT INTO favorites (user_id, video_id, title, channel, thumbnail, service)
@@ -413,10 +418,10 @@ app.post('/api/favorites/add', async (req, res) => {
          SET title = EXCLUDED.title,
              channel = EXCLUDED.channel,
              thumbnail = EXCLUDED.thumbnail`,
-      [userId, video.id, video.title, video.channel, video.thumb, video.service || 'youtube']
+      [userId, video.id, video.title, video.channel, video.thumb, safeService]
     );
 
-    console.log(`➕ Favorito adicionado para usuário ${userId}: ${video.title}`);
+    console.log(`➕ Favorito adicionado para usuário ${userId}: ${video.title} [${safeService}]`);
     res.json({ success: true });
   } catch (error) {
     console.error('Erro em /api/favorites/add:', error);
