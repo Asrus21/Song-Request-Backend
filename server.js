@@ -151,6 +151,34 @@ async function initDatabase() {
       END $$;
     `);
 
+    // 4. Corrige foreign key apontando para tabela errada "users" → "twitch_users"
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'favorites_user_id_fkey'
+        ) THEN
+          ALTER TABLE favorites DROP CONSTRAINT favorites_user_id_fkey;
+        END IF;
+
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'favorites_user_id_fkey_twitch'
+        ) THEN
+          ALTER TABLE favorites
+            ADD CONSTRAINT favorites_user_id_fkey_twitch
+            FOREIGN KEY (user_id) REFERENCES twitch_users(id) ON DELETE CASCADE;
+        END IF;
+      END $$;
+    `);
+
+    // 5. Amplia coluna service para não truncar valores longos
+    await pool.query(`
+      ALTER TABLE favorites
+      ALTER COLUMN service TYPE VARCHAR(50)
+    `);
+
     console.log('✅ Banco de dados inicializado com sucesso!');
   } catch (error) {
     console.error('Erro ao inicializar banco:', error);
