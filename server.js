@@ -313,56 +313,8 @@ app.post('/api/auth/verify', async (req, res) => {
 });
 
 // ==================== FAVORITOS ====================
-app.post('/api/favorites', async (req, res) => {
-  const { uuid, favorites } = req.body;
 
-  if (!uuid) {
-    return res.status(400).json({ error: 'UUID é obrigatório' });
-  }
-
-  try {
-    const userResult = await pool.query(
-      `SELECT u.id FROM twitch_users u
-       JOIN user_sessions s ON u.id = s.user_id
-       WHERE s.session_uuid = $1`,
-      [uuid]
-    );
-
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Usuário não encontrado' });
-    }
-
-    const userId = userResult.rows[0].id;
-    const client = await pool.connect();
-
-    try {
-      await client.query('BEGIN');
-      await client.query('DELETE FROM favorites WHERE user_id = $1', [userId]);
-
-      for (const fav of favorites) {
-        await client.query(
-          `INSERT INTO favorites (user_id, video_id, title, channel, thumbnail, service)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [userId, fav.id, fav.title, fav.channel, fav.thumb, fav.service || 'youtube']
-        );
-      }
-
-      await client.query('COMMIT');
-      console.log(`💾 Favoritos salvos para usuário ${userId}: ${favorites.length} itens`);
-      res.json({ success: true, count: favorites.length });
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
-
-  } catch (error) {
-    console.error('Erro em /api/favorites:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-});
-
+// Adicionar favorito individual
 app.post('/api/favorites/add', async (req, res) => {
   const { uuid, video } = req.body;
 
@@ -387,7 +339,10 @@ app.post('/api/favorites/add', async (req, res) => {
     await pool.query(
       `INSERT INTO favorites (user_id, video_id, title, channel, thumbnail, service)
        VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (user_id, video_id, service) DO NOTHING`,
+       ON CONFLICT (user_id, video_id, service) DO UPDATE
+         SET title = EXCLUDED.title,
+             channel = EXCLUDED.channel,
+             thumbnail = EXCLUDED.thumbnail`,
       [userId, video.id, video.title, video.channel, video.thumb, video.service || 'youtube']
     );
 
@@ -399,8 +354,9 @@ app.post('/api/favorites/add', async (req, res) => {
   }
 });
 
-app.delete('/api/favorites', async (req, res) => {
-  const { uuid, videoId } = req.body;
+// Remover favorito individual
+app.delete('/api/favorites/one', async (req, res) => {
+  const { uuid, videoId, service } = req.body;
 
   if (!uuid || !videoId) {
     return res.status(400).json({ error: 'UUID e videoId são obrigatórios' });
@@ -419,18 +375,19 @@ app.delete('/api/favorites', async (req, res) => {
     }
 
     await pool.query(
-      'DELETE FROM favorites WHERE user_id = $1 AND video_id = $2',
-      [userResult.rows[0].id, videoId]
+      'DELETE FROM favorites WHERE user_id = $1 AND video_id = $2 AND service = $3',
+      [userResult.rows[0].id, videoId, service || 'youtube']
     );
 
     console.log(`❌ Favorito removido: ${videoId}`);
     res.json({ success: true });
   } catch (error) {
-    console.error('Erro em /api/favorites (DELETE):', error);
+    console.error('Erro em /api/favorites/one:', error);
     res.status(500).json({ error: 'Erro interno' });
   }
 });
 
+// Limpar todos os favoritos
 app.delete('/api/favorites/all', async (req, res) => {
   const { uuid } = req.body;
 
