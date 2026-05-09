@@ -106,6 +106,7 @@ async function initDatabase() {
         user_id      INTEGER REFERENCES twitch_users(id) ON DELETE CASCADE,
         session_uuid VARCHAR(32) UNIQUE NOT NULL,
         created_at   TIMESTAMP DEFAULT NOW(),
+        expires_at   TIMESTAMP DEFAULT NOW() + INTERVAL '7 days',
         UNIQUE(user_id)
       );
 
@@ -183,13 +184,22 @@ async function initDatabase() {
       END $$;
     `);
 
-    // 6. Amplia video_id — IDs do Spotify podem ser maiores que 50 chars
+    // 7. Adiciona expiração de sessão se não existir
+    await pool.query(`
+      DO $$
+      BEGIN
+        ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS
+          expires_at TIMESTAMP DEFAULT NOW() + INTERVAL '7 days';
+      EXCEPTION WHEN others THEN NULL;
+      END $$;
+    `);
+
+    // 8. Amplia video_id — IDs do Spotify podem ser maiores que 50 chars
     await pool.query(`
       DO $$
       BEGIN
         ALTER TABLE favorites ALTER COLUMN video_id TYPE VARCHAR(100);
-      EXCEPTION WHEN others THEN
-        NULL;
+      EXCEPTION WHEN others THEN NULL;
       END $$;
     `);
 
@@ -353,7 +363,7 @@ app.post('/api/auth/verify', async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT u.id, u.twitch_user_id, u.twitch_login, u.twitch_display_name, u.channel_name,
-              u.access_token, u.token_expires_at, u.refresh_token
+              u.access_token, u.token_expires_at, u.refresh_token, s.expires_at
        FROM twitch_users u
        JOIN user_sessions s ON u.id = s.user_id
        WHERE s.session_uuid = $1`,
@@ -361,12 +371,20 @@ app.post('/api/auth/verify', async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      console.log(`⚠️ Sessão não encontrada para UUID: ${uuid}`);
+      console.log(`⚠️ Sessão não encontrada: ${uuid.substring(0, 8)}...`);
       return res.json({ authenticated: false });
     }
 
-    const user         = result.rows[0];
-    const isTokenValid = new Date() < user.token_expires_at;
+    const user = result.rows[0];
+
+    // Verifica expiração da sessão
+    if (user.expires_at && new Date() > new Date(user.expires_at)) {
+      console.log(`⏰ Sessão expirada para: ${user.twitch_display_name}`);
+      await pool.query('DELETE FROM user_sessions WHERE session_uuid = $1', [uuid]);
+      return res.json({ authenticated: false });
+    }
+
+    const isTokenValid = new Date() < new Date(user.token_expires_at);
 
     const favoritesResult = await pool.query(
       `SELECT video_id, title, channel, thumbnail, service, added_at
