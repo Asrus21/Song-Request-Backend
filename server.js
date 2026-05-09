@@ -235,19 +235,31 @@ app.get('/api/auth/twitch/callback', async (req, res) => {
       console.log(`🆕 Novo usuário criado: ${twitchDisplayName} (${twitchUserId})`);
     }
 
-    // Upsert sessão — sempre reutiliza o mesmo UUID para o mesmo usuário
-    // Isso evita invalidar sessões abertas em outros dispositivos ao logar novamente
-    const sessionResult = await pool.query(
-      `INSERT INTO user_sessions (user_id, session_uuid, created_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (user_id) DO UPDATE
-         SET session_uuid = EXCLUDED.session_uuid,
-             created_at   = NOW()
-       RETURNING session_uuid`,
-      [userId, generateUUID()]
+    // Upsert sessão — reutiliza UUID existente se já houver sessão para este usuário
+    // Isso garante que outros dispositivos já logados continuam funcionando
+    const existingSession = await pool.query(
+      'SELECT session_uuid FROM user_sessions WHERE user_id = $1',
+      [userId]
     );
 
-    const sessionUUID = sessionResult.rows[0].session_uuid;
+    let sessionUUID;
+    if (existingSession.rows.length > 0) {
+      // Já tem sessão — reutiliza o UUID existente
+      sessionUUID = existingSession.rows[0].session_uuid;
+      await pool.query(
+        'UPDATE user_sessions SET created_at = NOW() WHERE user_id = $1',
+        [userId]
+      );
+      console.log(`♻️ Sessão reutilizada para: ${twitchDisplayName}`);
+    } else {
+      // Primeira vez — gera UUID novo
+      sessionUUID = generateUUID();
+      await pool.query(
+        'INSERT INTO user_sessions (user_id, session_uuid, created_at) VALUES ($1, $2, NOW())',
+        [userId, sessionUUID]
+      );
+      console.log(`🆕 Nova sessão criada para: ${twitchDisplayName}`);
+    }
 
     console.log(`✅ Login bem sucedido! Redirecionando para ${FRONTEND_URL}?login=success&uuid=${sessionUUID}`);
     res.redirect(`${FRONTEND_URL}?login=success&uuid=${sessionUUID}`);
