@@ -115,10 +115,40 @@ async function initDatabase() {
     `);
 
     // ── Migrations: adiciona colunas novas em bancos já existentes ──────────
-    // ADD COLUMN IF NOT EXISTS é seguro: ignora se já existir
+
+    // 1. Garante que a coluna service existe
     await pool.query(`
       ALTER TABLE favorites
       ADD COLUMN IF NOT EXISTS service VARCHAR(20) DEFAULT 'youtube'
+    `);
+
+    // 2. Preenche NULL na coluna service (linhas antigas sem valor)
+    await pool.query(`
+      UPDATE favorites SET service = 'youtube' WHERE service IS NULL
+    `);
+
+    // 3. Corrige a constraint UNIQUE — remove a antiga (user_id, video_id) se existir
+    //    e garante a nova (user_id, video_id, service)
+    await pool.query(`
+      DO $$
+      BEGIN
+        -- Remove constraint antiga sem service, se existir
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'favorites_user_id_video_id_key'
+        ) THEN
+          ALTER TABLE favorites DROP CONSTRAINT favorites_user_id_video_id_key;
+        END IF;
+
+        -- Adiciona constraint nova com service, se não existir
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'favorites_user_id_video_id_service_key'
+        ) THEN
+          ALTER TABLE favorites ADD CONSTRAINT favorites_user_id_video_id_service_key
+            UNIQUE (user_id, video_id, service);
+        END IF;
+      END $$;
     `);
 
     console.log('✅ Banco de dados inicializado com sucesso!');
