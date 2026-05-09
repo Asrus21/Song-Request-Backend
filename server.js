@@ -179,7 +179,17 @@ async function initDatabase() {
       BEGIN
         ALTER TABLE favorites ALTER COLUMN service TYPE VARCHAR(50);
       EXCEPTION WHEN others THEN
-        NULL; -- ignora se já for maior ou outro erro menor
+        NULL;
+      END $$;
+    `);
+
+    // 6. Amplia video_id — IDs do Spotify podem ser maiores que 50 chars
+    await pool.query(`
+      DO $$
+      BEGIN
+        ALTER TABLE favorites ALTER COLUMN video_id TYPE VARCHAR(100);
+      EXCEPTION WHEN others THEN
+        NULL;
       END $$;
     `);
 
@@ -410,18 +420,30 @@ app.post('/api/favorites/add', async (req, res) => {
 
     const userId = userResult.rows[0].id;
     const safeService = (video.service || 'youtube').substring(0, 50);
+    const safeVideoId = (video.id || '').substring(0, 100);
+    const safeChannel = (video.channel || '').substring(0, 255);
+
+    console.log(`📝 Inserindo favorito:`, {
+      userId,
+      id: safeVideoId,
+      idLen: safeVideoId.length,
+      service: safeService,
+      serviceLen: safeService.length,
+      channel: safeChannel.substring(0, 30),
+      channelLen: safeChannel.length
+    });
 
     await pool.query(
       `INSERT INTO favorites (user_id, video_id, title, channel, thumbnail, service)
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (user_id, video_id, service) DO UPDATE
-         SET title = EXCLUDED.title,
-             channel = EXCLUDED.channel,
+         SET title     = EXCLUDED.title,
+             channel   = EXCLUDED.channel,
              thumbnail = EXCLUDED.thumbnail`,
-      [userId, video.id, video.title, video.channel, video.thumb, safeService]
+      [userId, safeVideoId, video.title, safeChannel, video.thumb, safeService]
     );
 
-    console.log(`➕ Favorito adicionado para usuário ${userId}: ${video.title} [${safeService}]`);
+    console.log(`➕ Favorito salvo: ${video.title} [${safeService}]`);
     res.json({ success: true });
   } catch (error) {
     console.error('Erro em /api/favorites/add:', error);
@@ -544,6 +566,10 @@ app.post('/api/spotify/search', async (req, res) => {
   }
 });
 
+// Cache de IDs da Twitch para evitar chamadas repetidas à API
+const twitchIdCache = new Map(); // login → broadcaster_id
+const senderIdCache = new Map(); // user.id (DB) → twitch sender_id
+
 // ==================== ENVIAR COMANDO ====================
 app.post('/api/send', async (req, res) => {
   const { uuid, videoId, title, service, channelName } = req.body;
@@ -569,54 +595,44 @@ app.post('/api/send', async (req, res) => {
       return res.status(404).json({ error: 'Usuário não encontrado' });
     }
 
-    const user        = userResult.rows[0];
+    const user         = userResult.rows[0];
     const cleanChannel = channelName.toLowerCase().replace('#', '');
-    const accessToken = await getValidAccessToken(user.id, user.refresh_token);
+    const accessToken  = await getValidAccessToken(user.id, user.refresh_token);
 
     if (!accessToken) {
       return res.status(401).json({ error: 'Token Twitch expirado. Faça login novamente.' });
     }
 
-    // Obter broadcaster_id do canal alvo
-    const channelResponse = await axios.get('https://api.twitch.tv/helix/users', {
-      params:  { login: cleanChannel },
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Client-Id':     TWITCH_CLIENT_ID
-      }
-    });
+    const headers = {
+      'Authorization': `Bearer ${accessToken}`,
+      'Client-Id':     TWITCH_CLIENT_ID
+    };
 
-    if (!channelResponse.data.data.length) {
-      return res.status(404).json({ error: `Canal "${cleanChannel}" não encontrado na Twitch.` });
-    }
-
-    const broadcasterId = channelResponse.data.data[0].id;
-
-    // sender_id = ID do usuário logado
-    const senderResponse = await axios.get('https://api.twitch.tv/helix/users', {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Client-Id':     TWITCH_CLIENT_ID
-      }
-    });
-    const senderId = senderResponse.data.data[0].id;
+    // Busca broadcaster e sender em paralelo, usando cache quando disponível
+    const [broadcasterId, senderId] = await Promise.all([
+      (async () => {
+        if (twitchIdCache.has(cleanChannel)) return twitchIdCache.get(cleanChannel);
+        const r = await axios.get('https://api.twitch.tv/helix/users', { params: { login: cleanChannel }, headers });
+        if (!r.data.data.length) throw new Error(`Canal "${cleanChannel}" não encontrado.`);
+        const id = r.data.data[0].id;
+        twitchIdCache.set(cleanChannel, id);
+        return id;
+      })(),
+      (async () => {
+        if (senderIdCache.has(user.id)) return senderIdCache.get(user.id);
+        const r = await axios.get('https://api.twitch.tv/helix/users', { headers });
+        const id = r.data.data[0].id;
+        senderIdCache.set(user.id, id);
+        return id;
+      })()
+    ]);
 
     const message = `!sr ${videoId}`;
 
     await axios.post(
       'https://api.twitch.tv/helix/chat/messages',
-      {
-        broadcaster_id: broadcasterId,
-        sender_id:      senderId,
-        message
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Client-Id':     TWITCH_CLIENT_ID,
-          'Content-Type':  'application/json'
-        }
-      }
+      { broadcaster_id: broadcasterId, sender_id: senderId, message },
+      { headers: { ...headers, 'Content-Type': 'application/json' } }
     );
 
     console.log(`✅ Enviado: ${message} → #${cleanChannel} [${service || 'youtube'}]`);
@@ -624,7 +640,7 @@ app.post('/api/send', async (req, res) => {
 
   } catch (error) {
     console.error('Erro ao enviar comando:', error.response?.data || error.message);
-    const msg = error.response?.data?.message || 'Erro ao enviar mensagem no chat.';
+    const msg = error.response?.data?.message || error.message || 'Erro ao enviar mensagem no chat.';
     res.status(500).json({ error: msg });
   }
 });
