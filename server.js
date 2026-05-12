@@ -645,7 +645,9 @@ app.post('/api/send', async (req, res) => {
       })()
     ]);
 
-    const message = `!sr ${videoId}`;
+    const message = service === 'spotify'
+      ? `!sr https://open.spotify.com/track/${videoId}`
+      : `!sr ${videoId}`;
 
     await axios.post(
       'https://api.twitch.tv/helix/chat/messages',
