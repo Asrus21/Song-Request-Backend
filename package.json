@@ -1,7 +1,7 @@
 {
   "name": "song-request-backend",
-  "version": "3.0.0",
-  "description": "Backend para Song Request Queue com Twitch OAuth",
+  "version": "4.0.0",
+  "description": "Backend para Song Request Queue com Twitch OAuth, YouTube, Spotify e Playlists",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
