@@ -698,6 +698,61 @@ app.delete('/api/playlists/delete', async (req, res) => {
   }
 });
 
+// Editar nome da playlist
+app.put('/api/playlists/edit', async (req, res) => {
+  const { uuid, playlistId, newName } = req.body;
+
+  if (!uuid || !playlistId || !newName || !newName.trim()) {
+    return res.status(400).json({ error: 'UUID, playlistId e newName são obrigatórios' });
+  }
+
+  try {
+    const userResult = await pool.query(
+      `SELECT u.id FROM twitch_users u
+       JOIN user_sessions s ON u.id = s.user_id
+       WHERE s.session_uuid = $1`,
+      [uuid]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+
+    const userId = userResult.rows[0].id;
+    const cleanName = newName.trim().substring(0, 100);
+
+    // Verifica se a playlist pertence ao usuário
+    const playlistCheck = await pool.query(
+      'SELECT id FROM playlists WHERE id = $1 AND user_id = $2',
+      [playlistId, userId]
+    );
+
+    if (playlistCheck.rows.length === 0) {
+      return res.status(403).json({ error: 'Playlist não pertence ao usuário' });
+    }
+
+    // Verifica se já existe outra playlist com o mesmo nome
+    const existingCheck = await pool.query(
+      'SELECT id FROM playlists WHERE user_id = $1 AND name = $2 AND id != $3',
+      [userId, cleanName, playlistId]
+    );
+
+    if (existingCheck.rows.length > 0) {
+      return res.status(400).json({ error: 'Já existe uma playlist com este nome' });
+    }
+
+    await pool.query(
+      'UPDATE playlists SET name = $1, updated_at = NOW() WHERE id = $2',
+      [cleanName, playlistId]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Erro ao editar playlist:', error);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
 // ==================== YOUTUBE PROXY ====================
 app.post('/api/youtube/search', async (req, res) => {
   const { query } = req.body;
