@@ -1,6 +1,6 @@
 {
   "name": "song-request-backend",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "description": "Backend para Song Request Queue com Twitch OAuth, YouTube, Spotify e Playlists",
   "main": "server.js",
   "scripts": {
@@ -10,6 +10,7 @@
     "express": "^4.18.2",
     "cors": "^2.8.5",
     "pg": "^8.11.3",
-    "axios": "^1.6.2"
+    "axios": "^1.6.2",
+    "ws": "^8.18.0"
   }
 }
