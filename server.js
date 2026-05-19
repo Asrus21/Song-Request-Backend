@@ -3,6 +3,7 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const crypto = require('crypto');
 const axios = require('axios');
+const WebSocket = require('ws');
 
 const app = express();
 app.use(cors());
@@ -809,6 +810,80 @@ app.post('/api/spotify/search', async (req, res) => {
 const twitchIdCache = new Map();
 const senderIdCache = new Map();
 
+// ==================== LEITOR DE CHAT IRC (detecção de resposta do bot) ====================
+// Conecta ao IRC da Twitch como leitor anônimo e escuta por uma resposta do bot
+// mencionando o usuário. Retorna o tipo de resposta detectada.
+function listenChatResponse(channel, senderLogin, timeoutMs = 6000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const cleanChannel = channel.toLowerCase().replace('#', '');
+    const cleanSender  = senderLogin.toLowerCase();
+
+    let ws;
+    try {
+      ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+    } catch (e) {
+      return resolve({ detected: 'ok' });
+    }
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { ws.close(); } catch (_) {}
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => finish({ detected: 'ok' }), timeoutMs);
+
+    ws.on('open', () => {
+      // Login anônimo (justinfan) — só leitura, não precisa de token
+      ws.send('CAP REQ :twitch.tv/tags twitch.tv/commands');
+      ws.send('PASS SCHMOOPIIE');
+      ws.send('NICK justinfan' + Math.floor(Math.random() * 100000));
+      ws.send(`JOIN #${cleanChannel}`);
+    });
+
+    ws.on('message', (data) => {
+      const raw = data.toString();
+
+      if (raw.startsWith('PING')) {
+        ws.send('PONG :tmi.twitch.tv');
+        return;
+      }
+
+      if (!raw.includes('PRIVMSG')) return;
+
+      const msgMatch = raw.match(/PRIVMSG #[^ ]+ :(.+)/);
+      if (!msgMatch) return;
+      const text = msgMatch[1].toLowerCase().trim();
+
+      // A resposta do bot precisa mencionar o usuário que pediu
+      if (!text.includes(cleanSender)) return;
+
+      // Cooldown: "you have to wait X seconds before you can request a song again"
+      const cooldownMatch = text.match(/wait\s+(\d+)\s+seconds?/);
+      if (cooldownMatch) {
+        return finish({ detected: 'cooldown', seconds: parseInt(cooldownMatch[1]) });
+      }
+
+      // Duplicada: "this song is already in the queue"
+      if (text.includes('already in the queue') || text.includes('já está na fila')) {
+        return finish({ detected: 'duplicate' });
+      }
+
+      // Sucesso explícito: "has been added to the queue"
+      if (text.includes('added to the queue') || text.includes('adicionada')) {
+        return finish({ detected: 'ok' });
+      }
+    });
+
+    ws.on('error', () => finish({ detected: 'ok' }));
+    ws.on('close', () => { if (!settled) finish({ detected: 'ok' }); });
+  });
+}
+
+// ==================== ENVIAR COMANDO ====================
 app.post('/api/send', async (req, res) => {
   const { uuid, videoId, title, service, channelName } = req.body;
 
@@ -822,7 +897,7 @@ app.post('/api/send', async (req, res) => {
 
   try {
     const userResult = await pool.query(
-      `SELECT u.id, u.access_token, u.token_expires_at, u.refresh_token, u.twitch_user_id
+      `SELECT u.id, u.access_token, u.token_expires_at, u.refresh_token, u.twitch_user_id, u.twitch_login
        FROM twitch_users u
        JOIN user_sessions s ON u.id = s.user_id
        WHERE s.session_uuid = $1`,
@@ -868,18 +943,43 @@ app.post('/api/send', async (req, res) => {
       ? `!sr https://open.spotify.com/track/${videoId}`
       : `!sr ${videoId}`;
 
+    // Começa a escutar o chat ANTES de enviar (para não perder a resposta)
+    const listenPromise = listenChatResponse(cleanChannel, user.twitch_login, 6000);
+
+    // Envia o comando
     await axios.post(
       'https://api.twitch.tv/helix/chat/messages',
       { broadcaster_id: broadcasterId, sender_id: senderId, message },
       { headers: { ...headers, 'Content-Type': 'application/json' } }
     );
 
+    // Aguarda a resposta do bot
+    const botResponse = await listenPromise;
+
+    if (botResponse.detected === 'cooldown') {
+      return res.json({
+        success: false,
+        reason:  'cooldown',
+        seconds: botResponse.seconds,
+        error:   `Cooldown ativo — aguarde ${botResponse.seconds}s`
+      });
+    }
+
+    if (botResponse.detected === 'duplicate') {
+      return res.json({
+        success: false,
+        reason:  'duplicate',
+        error:   'Música já está na fila'
+      });
+    }
+
+    // 'ok' ou nada detectado → considera sucesso
     res.json({ success: true });
 
   } catch (error) {
     console.error('Erro ao enviar comando:', error.response?.data || error.message);
     const msg = error.response?.data?.message || error.message || 'Erro ao enviar mensagem no chat.';
-    res.status(500).json({ error: msg });
+    res.status(500).json({ success: false, reason: 'error', error: msg });
   }
 });
 
